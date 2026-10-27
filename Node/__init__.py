@@ -128,9 +128,66 @@ class H3CourseResolutionPreset(io.ComfyNode):
         w3, h3 = resolve_selection(ratio, '3코스 해상도')
         return io.NodeOutput(w1, h1, w3, h3)
 
+
+import torch
+import comfy.model_management
+import comfy.utils
+
+MOSS_PRESETS = {
+    '16:9': ((1536, 864), (1728, 960), (1920, 1088)),
+    '9:16': ((864, 1536), (960, 1728), (1088, 1920)),
+    '2:3': ((832, 1248), (1024, 1536), (1152, 1728)),
+    '3:2': ((1248, 832), (1536, 1024), (1728, 1152)),
+    '1:1': ((960, 960), (1280, 1280), (1440, 1440)),
+    '21:9': ((1568, 672), (1792, 768), (2240, 960)),
+}
+
+class MossInput(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id='SsubongMossImageInput',
+            display_name='MOSS · 비율 · 해상도 · 편집 강도',
+            category='ssubong/MOSS',
+            description='이미지 연결: img2img. 이미지 노드를 바이패스하거나 연결 해제: T2I. 편집 강도는 이미지가 있을 때만 적용됩니다.',
+            inputs=[
+                io.Vae.Input('vae'),
+                io.DynamicCombo.Input('ratio', display_name='화면 비율', options=[
+                    io.DynamicCombo.Option(r, inputs=[
+                        io.Combo.Input('해상도 단계', options=[option_label(w, h) for w, h in sizes], default=option_label(*sizes[0]))
+                    ]) for r, sizes in MOSS_PRESETS.items()
+                ]),
+                io.Int.Input('batch_size', display_name='생성 개수', default=1, min=1, max=64),
+                io.Float.Input('edit_denoise', display_name='편집 강도 (denoise)', default=0.6, min=0.01, max=1.0, step=0.01),
+                io.Image.Input('image', optional=True),
+            ],
+            outputs=[
+                io.Latent.Output('latent'),
+                io.Float.Output('denoise'),
+                io.Int.Output('width'),
+                io.Int.Output('height'),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, vae, ratio, batch_size=1, edit_denoise=0.6, image=None):
+        sizes = MOSS_PRESETS[ratio['ratio']]
+        options = [option_label(w, h) for w, h in sizes]
+        width, height = sizes[options.index(ratio['해상도 단계'])]
+        if image is None:
+            latent = torch.zeros([batch_size, 128, height // 16, width // 16],
+                                 device=comfy.model_management.intermediate_device())
+            denoise = 1.0
+        else:
+            pixels = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, 'lanczos', 'center').movedim(1, -1)
+            latent = vae.encode(pixels[:, :, :, :3])
+            latent = comfy.utils.repeat_to_batch_size(latent, batch_size)
+            denoise = float(edit_denoise)
+        return io.NodeOutput({'samples': latent}, denoise, width, height)
+
 class ResolutionPresetExtension(ComfyExtension):
     async def get_node_list(self):
-        return [ResolutionPreset, QwenResolutionPreset, H3ResolutionPreset, H3CourseResolutionPreset]
+        return [ResolutionPreset, QwenResolutionPreset, H3ResolutionPreset, H3CourseResolutionPreset, MossInput]
 
 async def comfy_entrypoint():
     return ResolutionPresetExtension()
